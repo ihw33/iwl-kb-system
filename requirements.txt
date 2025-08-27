@@ -7,6 +7,8 @@ python-dotenv==1.0.0
 # Vector Databases
 chromadb==0.4.22
 pinecone-client==3.0.2
+faiss-cpu==1.7.4
+annoy==1.17.3
 
 # Embeddings & LLM
 openai==1.12.0
