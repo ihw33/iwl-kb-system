@@ -15,6 +15,20 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Import Vector DB and RAG components
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
+from vectordb.chroma_manager import ChromaManager
+from embeddings.embedding_pipeline import EmbeddingPipeline
+from rag.rag_pipeline import RAGPipeline
+
+# Initialize components
+chroma_manager = ChromaManager(persist_directory="./chroma_db")
+embedding_pipeline = EmbeddingPipeline(model_type="sentence-transformer")
+rag_pipeline = RAGPipeline(chroma_manager, embedding_pipeline)
+
 # Initialize FastAPI app
 app = FastAPI(
     title="IWL Knowledge Base API",
@@ -294,16 +308,30 @@ async def semantic_search(request: SearchRequest):
     """
     Perform semantic search on knowledge base
     """
-    # TODO: Implement actual search logic
-    # This is a placeholder response
-    return [
-        SearchResult(
-            id="doc_001",
-            content="Sample content matching your query",
-            score=0.95,
-            metadata={"title": "Sample Document", "level": "beginner"}
+    try:
+        # Retrieve relevant documents
+        results = rag_pipeline.retrieve_context(
+            query=request.query,
+            n_results=request.top_k,
+            filters=request.filters
         )
-    ]
+        
+        # Format results
+        search_results = []
+        for result in results:
+            search_results.append(SearchResult(
+                id=result.get("id", "unknown"),
+                content=result["text"],
+                score=1.0 - result.get("distance", 0.5),
+                metadata=result.get("metadata", {})
+            ))
+        
+        return search_results
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Search failed: {str(e)}"
+        )
 
 # RAG Endpoints
 @app.post("/api/rag/query", response_model=RAGResponse)
@@ -311,27 +339,60 @@ async def rag_query(request: RAGRequest):
     """
     Process a question using RAG (Retrieval-Augmented Generation)
     """
-    # TODO: Implement actual RAG logic
-    # This is a placeholder response
-    return RAGResponse(
-        answer="This is a sample answer to your question based on the knowledge base.",
-        sources=["doc_001", "doc_002"],
-        confidence=0.85
-    )
+    try:
+        # Execute RAG query
+        result = rag_pipeline.query(
+            question=request.question,
+            temperature=request.temperature,
+            include_sources=True
+        )
+        
+        # Extract source IDs
+        source_ids = []
+        if "sources" in result:
+            source_ids = [source.get("id", "") for source in result["sources"] if source.get("id")]
+        
+        return RAGResponse(
+            answer=result["answer"],
+            sources=source_ids[:5],  # Limit to 5 sources
+            confidence=result.get("confidence", 0.5)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"RAG query failed: {str(e)}"
+        )
 
 # Content Management
 @app.post("/api/index")
 async def index_content(request: IndexRequest):
     """
-    Index new content into the knowledge base
+    Index new content into the knowledge base (Vector DB)
     """
-    # TODO: Implement actual indexing logic
-    return {
-        "status": "success",
-        "message": "Content indexed successfully",
-        "document_id": "doc_new_001",
-        "chunks_created": 5
-    }
+    try:
+        # Create document object
+        doc_id = str(uuid.uuid4())
+        document = {
+            "id": doc_id,
+            "content": request.content,
+            "metadata": request.metadata
+        }
+        
+        # Index into vector database
+        result = rag_pipeline.index_document(document)
+        
+        return {
+            "status": "success",
+            "message": "Content indexed successfully",
+            "document_id": result["document_id"],
+            "chunks_created": result["chunks_created"],
+            "chunk_ids": result.get("chunk_ids", [])
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Indexing failed: {str(e)}"
+        )
 
 @app.get("/api/content/{content_id}")
 async def get_content(content_id: str):
@@ -417,6 +478,36 @@ async def delete_documents_batch(document_ids: List[str]):
         "not_found": not_found_ids,
         "total_requested": len(document_ids)
     }
+
+# Vector DB Operations
+@app.get("/api/vectordb/stats")
+async def get_vectordb_stats():
+    """
+    Get Vector DB statistics
+    """
+    try:
+        stats = chroma_manager.get_collection_stats()
+        stats["embedding_model"] = embedding_pipeline.get_model_info()
+        return stats
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get stats: {str(e)}"
+        )
+
+@app.post("/api/vectordb/reset")
+async def reset_vectordb():
+    """
+    Reset the Vector DB (use with caution!)
+    """
+    try:
+        chroma_manager.reset_collection()
+        return {"status": "success", "message": "Vector DB reset complete"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Reset failed: {str(e)}"
+        )
 
 # Statistics & Monitoring
 @app.get("/api/stats")
